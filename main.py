@@ -12,9 +12,11 @@ import time
 from jinja2 import Template
 
 # ==================== 配置区域 ====================
+# 从环境变量读取钉钉机器人配置（GitHub Actions 中通过 Secrets 提供）
 DINGTALK_WEBHOOK_URL = os.environ.get("DINGTALK_WEBHOOK_URL", "https://oapi.dingtalk.com/robot/send?access_token=你的token")
 DINGTALK_SECRET = os.environ.get("DINGTALK_SECRET", "")
 
+# 数据获取开关（目前数据获取函数尚未实现，开关保留用于后续扩展）
 ENABLE_WEATHER = True
 ENABLE_INJURY = True
 ENABLE_XG = True
@@ -22,7 +24,9 @@ ENABLE_ELO = True
 ENABLE_ODDS = True
 # ==================================================
 
+# ==================== 辅助函数 ====================
 def get_text(url, headers=None, timeout=5):
+    """通用 GET 请求，返回文本，失败返回 None"""
     try:
         r = requests.get(url, headers=headers, timeout=timeout)
         r.raise_for_status()
@@ -31,6 +35,7 @@ def get_text(url, headers=None, timeout=5):
         return None
 
 def get_json(url, headers=None, timeout=5):
+    """通用 GET JSON 请求，失败返回 None"""
     try:
         r = requests.get(url, headers=headers, timeout=timeout)
         r.raise_for_status()
@@ -39,37 +44,49 @@ def get_json(url, headers=None, timeout=5):
         return None
 
 def safe_float(value):
+    """安全转换 float，失败返回 None"""
     try:
         return float(value)
     except:
         return None
 
 # ==================== 数据获取函数（目前为框架，返回 None） ====================
+# 后续你可以在这里实现具体的爬虫或 API 调用
+
 def fetch_elo(team_name):
+    """获取球队 Elo 评分，尝试多个免费源，失败返回 None"""
     if not ENABLE_ELO:
         return None
     # TODO: 实现 Elo 获取
+    # 例如：请求 ClubElo API 或 eloratings.net
     return None
 
 def fetch_xg(team_name):
+    """获取近5场 xG 数据，失败返回 None"""
     if not ENABLE_XG:
         return None
     # TODO: 实现 xG 获取
+    # 例如：Understat 或 FBref
     return None
 
 def fetch_injury(team_name):
+    """获取伤停名单，失败返回 None"""
     if not ENABLE_INJURY:
         return None
     # TODO: 实现伤停获取
+    # 例如：SofaScore / WhoScored
     return None
 
 def fetch_odds(league, home, away):
+    """获取竞彩赔率，失败返回 None"""
     if not ENABLE_ODDS:
         return None
     # TODO: 实现竞彩赔率获取
+    # 例如：500彩票网接口
     return None
 
 def fetch_weather(city):
+    """获取天气，使用 wttr.in（免费无key），失败返回 None"""
     if not ENABLE_WEATHER:
         return None
     url = f"https://wttr.in/{urllib.parse.quote(city)}?format=j1"
@@ -87,19 +104,27 @@ def fetch_weather(city):
     return None
 
 def fetch_standings(league):
+    """获取积分排名，失败返回 None"""
     # TODO: 实现积分排名获取
     return None
 
-# ==================== 战意指数计算 ====================
+# ==================== 战意指数计算（方案A：客观字段自动，主观字段为 None） ====================
+
 def calculate_war_intention(home_standings, away_standings, home_future, away_future):
+    """
+    根据客观数据计算战意指数，主观字段（教练表态、球迷压力）为 None。
+    返回字典或 None。
+    """
+    # 积分需求：排名越靠前需求越高，1-10分
     def need_score(rank):
         if rank is None:
             return None
-        return max(1, 10 - rank)
+        return max(1, 10 - rank)  # 排名1得9，排名10得1
 
     home_need = need_score(home_standings.get("排名") if home_standings else None)
     away_need = need_score(away_standings.get("排名") if away_standings else None)
 
+    # 未来赛程压力：未来7天内比赛场次（需提供未来赛程列表）
     def future_pressure(future_schedule):
         if not future_schedule:
             return None
@@ -123,14 +148,17 @@ def calculate_war_intention(home_standings, away_standings, home_future, away_fu
     home_pressure = future_pressure(home_future)
     away_pressure = future_pressure(away_future)
 
+    # 休息与体能：简化默认7（实际可计算休息天数）
     home_rest = 7
     away_rest = 7
 
+    # 主观部分设为 None
     home_coach = None
     away_coach = None
     home_fans = None
     away_fans = None
 
+    # 加权总分（主观为 None 时按比例调整权重）
     def weighted_total(need, pressure, rest, coach, fans):
         scores = [need, pressure, rest, coach, fans]
         weights = [0.3, 0.2, 0.2, 0.15, 0.15]
@@ -142,6 +170,7 @@ def calculate_war_intention(home_standings, away_standings, home_future, away_fu
                 weight_sum += w
         if weight_sum == 0:
             return None
+        # 归一化到 0-10
         return round(total / weight_sum * 10, 1)
 
     home_total = weighted_total(home_need, home_pressure, home_rest, home_coach, home_fans)
@@ -160,7 +189,10 @@ def calculate_war_intention(home_standings, away_standings, home_future, away_fu
     }
 
 # ==================== 主程序 ====================
+
 def parse_input(input_str):
+    """解析输入字符串，返回 (赛事编号, 联赛, 主队, 客队) 或 None"""
+    # 匹配：周X001 联赛 主队 VS 客队
     pattern = r'^(\S+\d{3})\s+(\S+)\s+(.+?)\s+VS\s+(.+)$'
     match = re.match(pattern, input_str.strip(), re.IGNORECASE)
     if not match:
@@ -168,6 +200,7 @@ def parse_input(input_str):
     return match.group(1), match.group(2), match.group(3).strip(), match.group(4).strip()
 
 def build_markdown(data):
+    """渲染 Markdown 模板，None 会显示为 null"""
     template_str = """
 ## ⚽ {{ 赛事编号 }} {{ 联赛 }} {{ 主队 }} vs {{ 客队 }}
 
@@ -217,12 +250,14 @@ def build_markdown(data):
     return template.render(**data)
 
 def send_dingtalk(markdown_text, title):
+    """推送钉钉 Markdown 消息，返回是否成功"""
     if DINGTALK_WEBHOOK_URL == "https://oapi.dingtalk.com/robot/send?access_token=你的token":
         print("❌ 错误：请先配置钉钉机器人 Webhook 地址")
         return False
 
     webhook_url = DINGTALK_WEBHOOK_URL
     if DINGTALK_SECRET:
+        # 加签处理
         timestamp = str(round(time.time() * 1000))
         secret_enc = DINGTALK_SECRET.encode("utf-8")
         string_to_sign = f"{timestamp}\n{DINGTALK_SECRET}"
@@ -252,6 +287,7 @@ def send_dingtalk(markdown_text, title):
         return False
 
 def main():
+    # 优先从环境变量读取输入（GitHub Actions 使用）
     input_str = os.environ.get("MATCH_INFO")
     if not input_str and len(sys.argv) > 1:
         input_str = " ".join(sys.argv[1:])
@@ -268,13 +304,14 @@ def main():
     match_id, league, home, away = parsed
     print(f"正在获取 {match_id} {league} {home} vs {away} 的数据...")
 
+    # ==================== 初始化数据结构（所有字段默认 None） ====================
     data = {
         "赛事编号": match_id,
         "联赛": league,
         "主队": home,
         "客队": away,
-        "数据覆盖等级": "低覆盖",
-        "竞彩赔率状态": "已发布",
+        "数据覆盖等级": "低覆盖",  # 可后续根据实际数据调整
+        "竞彩赔率状态": "已发布",  # 可后续根据赔率获取状态调整
         "数据获取时间": datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
         "赛季阶段信息": {
             "联赛": league,
@@ -370,6 +407,7 @@ def main():
         }
     }
 
+    # ==================== 获取数据（按模块，失败则保持 None） ====================
     print("获取 Elo 评分...")
     home_elo = fetch_elo(home)
     away_elo = fetch_elo(away)
@@ -414,7 +452,7 @@ def main():
         data["竞彩赔率状态"] = "未获取"
 
     print("获取天气...")
-    weather = fetch_weather(home)
+    weather = fetch_weather(home)  # 使用主队所在城市，实际应使用比赛城市
     if weather:
         data["环境变量"]["天气"] = weather
 
@@ -423,6 +461,8 @@ def main():
     if standings:
         data["环境变量"]["积分排名"] = standings
 
+    # 战意指数计算（方案A）
+    # 未来赛程目前暂未获取，所以传入 None
     war_intention = calculate_war_intention(
         home_standings=standings.get("主队") if standings else None,
         away_standings=standings.get("客队") if standings else None,
@@ -431,6 +471,7 @@ def main():
     )
     data["战意指数"] = war_intention
 
+    # 数据完整度风险提示
     missing_fields = []
     if not data["数据完整度"]["Elo获取"]:
         missing_fields.append("Elo")
@@ -446,6 +487,7 @@ def main():
     else:
         data["数据完整度"]["风险提示"] = "数据完整"
 
+    # ==================== 渲染与推送 ====================
     markdown_text = build_markdown(data)
     print("\n生成的 Markdown 内容：")
     print(markdown_text)
