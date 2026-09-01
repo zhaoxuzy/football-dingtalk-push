@@ -1,0 +1,31 @@
+name: Manual Football Push
+
+on:
+  workflow_dispatch:
+    inputs:
+      match_info:
+        description: '比赛信息（例如：周二001 沙职 利雅得新月 VS 吉达国民）'
+        required: true
+        default: '周二001 沙职 利雅得新月 VS 吉达国民'
+
+jobs:
+  push:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install requests jinja2
+
+      - name: Run push script
+        env:
+          MATCH_INFO: ${{ github.event.inputs.match_info }}
+          DINGTALK_WEBHOOK_URL: ${{ secrets.DINGTALK_WEBHOOK_URL }}
+          DINGTALK_SECRET: ${{ secrets.DINGTALK_SECRET }}
+        run: python main.py
