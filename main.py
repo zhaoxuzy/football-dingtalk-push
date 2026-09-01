@@ -26,7 +26,7 @@ ENABLE_ODDS = True
 ENABLE_STANDINGS = True
 # ==================================================
 
-# ==================== 球队名称映射（中文 → 英文，用于国际数据源） ====================
+# ==================== 球队名称映射（中文 → 英文） ====================
 TEAM_NAME_MAP = {
     "利雅得新月": "Al Hilal",
     "利雅得胜利": "Al Nassr",
@@ -44,15 +44,13 @@ TEAM_NAME_MAP = {
     "塔伊": "Al Tai",
     "卡利杰": "Al Khaleej",
     "阿科多": "Al Akhdoud",
-    # 可继续添加
 }
 
-# football-data.org 联赛 ID 映射（沙特职业联赛 ID）
+# football-data.org 联赛代码
 LEAGUE_ID_MAP = {
-    "沙职": "SA1",  # 沙特职业联赛在 football-data.org 的代码是 SA1
+    "沙职": "SA1",
     "沙特联": "SA1",
     "沙地联": "SA1",
-    # 其他联赛可自行添加
 }
 
 # ==================== 辅助函数 ====================
@@ -81,7 +79,7 @@ def safe_float(value):
 # ==================== 数据获取函数 ====================
 
 def fetch_elo(team_name):
-    """获取球队 Elo 评分，依次尝试 ClubElo API 和 eloratings.net CSV"""
+    """获取球队 Elo 评分，尝试 ClubElo API 和 eloratings.net CSV"""
     if not ENABLE_ELO:
         return None
 
@@ -122,25 +120,21 @@ def fetch_elo(team_name):
     return None
 
 def fetch_xg(team_name):
-    """获取近5场 xG 数据（尝试 Understat，可能需要球队 ID）"""
+    """获取近5场 xG 数据（目前暂不实现，返回 None）"""
     if not ENABLE_XG:
         return None
-    # Understat 不覆盖沙特联赛，返回 None 是合理的
     return None
 
 def fetch_injury(team_name):
-    """获取伤停名单（尝试 SofaScore，成功概率低）"""
+    """获取伤停名单（暂不实现）"""
     if not ENABLE_INJURY:
         return None
-    # TODO: 实现 SofaScore API 获取伤停，需要伪造请求头和球队 ID
     return None
 
 def fetch_odds(league, home, away):
-    """获取竞彩赔率（尝试中国竞彩官网或500彩票网）"""
+    """获取竞彩赔率（暂不实现）"""
     if not ENABLE_ODDS:
         return None
-    # 中国竞彩官网接口通常需要特定的参数，且国外服务器访问可能被限制
-    # 这里保留占位，返回 None
     return None
 
 def fetch_weather(city):
@@ -174,15 +168,13 @@ def fetch_standings(league):
     url = f"https://api.football-data.org/v4/competitions/{league_code}/standings"
     data = get_json(url, headers=headers)
     if data and "standings" in data:
-        # 返回第一个赛季的积分表（一般是当前赛季）
         try:
             table = data["standings"][0]["table"]
             standings = {}
             for row in table:
                 team_name = row["team"]["name"]
-                # 尝试匹配中文名
                 for cn, en in TEAM_NAME_MAP.items():
-                    if en.lower() == team_name.lower() or cn in team_name:
+                    if en.lower() == team_name.lower():
                         standings[cn] = {
                             "排名": row["position"],
                             "积分": row["points"],
@@ -221,16 +213,19 @@ def fetch_future_schedule(league, team_name):
     if not team_id:
         return None
 
-    # 获取未来比赛
     matches_url = f"https://api.football-data.org/v4/teams/{team_id}/matches?status=SCHEDULED"
     matches_data = get_json(matches_url, headers=headers)
     if matches_data and "matches" in matches_data:
         future = []
-        for match in matches_data["matches"][:5]:  # 最多取5场
+        for match in matches_data["matches"][:5]:
             try:
                 date = match["utcDate"][:10]
-                opponent = match["homeTeam"]["name"] if match["awayTeam"]["name"].lower() == english_name.lower() else match["awayTeam"]["name"]
-                home_away = "主" if match["homeTeam"]["name"].lower() == english_name.lower() else "客"
+                if match["homeTeam"]["name"].lower() == english_name.lower():
+                    opponent = match["awayTeam"]["name"]
+                    home_away = "主"
+                else:
+                    opponent = match["homeTeam"]["name"]
+                    home_away = "客"
                 future.append({"对手": opponent, "主客": home_away, "日期": date})
             except:
                 continue
@@ -249,7 +244,6 @@ def fetch_recent_matches(league, team_name):
         return None
 
     headers = {"X-Auth-Token": FOOTBALL_DATA_API_KEY}
-    # 获取球队 ID
     teams_url = f"https://api.football-data.org/v4/competitions/{league_code}/teams"
     teams_data = get_json(teams_url, headers=headers)
     team_id = None
@@ -261,12 +255,11 @@ def fetch_recent_matches(league, team_name):
     if not team_id:
         return None
 
-    # 获取已结束比赛
     matches_url = f"https://api.football-data.org/v4/teams/{team_id}/matches?status=FINISHED"
     matches_data = get_json(matches_url, headers=headers)
     if matches_data and "matches" in matches_data:
         recent = []
-        for match in matches_data["matches"][-5:]:  # 最近5场
+        for match in matches_data["matches"][-5:]:
             try:
                 if match["score"]["winner"] is None:
                     continue
@@ -291,7 +284,7 @@ def fetch_recent_matches(league, team_name):
         return recent
     return None
 
-# ==================== 战意指数计算（修正） ====================
+# ==================== 战意指数计算 ====================
 def calculate_war_intention(home_standings, away_standings, home_future, away_future):
     def need_score(rank):
         if rank is None:
@@ -469,9 +462,110 @@ def main():
     match_id, league, home, away = parsed
     print(f"正在获取 {match_id} {league} {home} vs {away} 的数据...")
 
-    # 初始化 data 结构（同上，略去完整字典，保持原样）
+    # ==================== 初始化 data 字典（完整） ====================
+    data = {
+        "赛事编号": match_id,
+        "联赛": league,
+        "主队": home,
+        "客队": away,
+        "数据覆盖等级": "低覆盖",
+        "竞彩赔率状态": "已发布",
+        "数据获取时间": datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "赛季阶段信息": {
+            "联赛": league,
+            "赛季": None,
+            "当前轮次": None,
+            "近5场数据构成": None
+        },
+        "基本面": {
+            "主队": {
+                "Elo评分": None,
+                "Elo来源": "ClubElo",
+                "Elo来源URL": "https://clubelo.com/",
+                "Elo更新时间": None,
+                "本赛季xG": None,
+                "本赛季xGA": None,
+                "xG来源": None,
+                "xG是否替代指标": None,
+                "近5场xG": None,
+                "近5场xGA": None,
+                "近5场战绩": None,
+                "近5场进球": None,
+                "近5场失球": None,
+                "近5场对手及赛事类型": None,
+                "主场场均进球": None,
+                "主场场均失球": None,
+                "主场战绩": None,
+                "主场胜率": None,
+                "伤停名单": None,
+                "预计首发完整性": None,
+                "主教练": None
+            },
+            "客队": {
+                "Elo评分": None,
+                "Elo来源": "ClubElo",
+                "Elo来源URL": "https://clubelo.com/",
+                "Elo更新时间": None,
+                "本赛季xG": None,
+                "本赛季xGA": None,
+                "xG来源": None,
+                "xG是否替代指标": None,
+                "近5场xG": None,
+                "近5场xGA": None,
+                "近5场战绩": None,
+                "近5场进球": None,
+                "近5场失球": None,
+                "近5场对手及赛事类型": None,
+                "客场场均进球": None,
+                "客场场均失球": None,
+                "客场战绩": None,
+                "客场胜率": None,
+                "伤停名单": None,
+                "预计首发完整性": None,
+                "主教练": None
+            },
+            "历史交锋": None
+        },
+        "战意指数": None,
+        "节奏数据": None,
+        "竞彩盘口": {
+            "胜平负": {
+                "初赔": {"主胜": None, "平": None, "客胜": None, "时间": None},
+                "即赔": {"主胜": None, "平": None, "客胜": None, "时间": None}
+            },
+            "让球胜平负": None,
+            "比分赔率": None,
+            "总进球赔率": None,
+            "半全场赔率": None,
+            "返还率": None,
+            "是否单关": None,
+            "国际赔率": None,
+            "凯利指数": None,
+            "资金流向": None
+        },
+        "环境变量": {
+            "天气": None,
+            "比赛城市": None,
+            "比赛场地": None,
+            "场地类型": None,
+            "主裁判": None,
+            "未来赛程": None,
+            "积分排名": None,
+            "德比属性": None
+        },
+        "数据完整度": {
+            "xG获取": False,
+            "Elo获取": False,
+            "伤停获取": False,
+            "竞彩赔率获取": False,
+            "伤停信息完整度": None,
+            "数据适用性": None,
+            "缺失项": [],
+            "风险提示": None
+        }
+    }
 
-    # 获取 Elo
+    # ==================== 获取数据 ====================
     print("获取 Elo 评分...")
     home_elo = fetch_elo(home)
     away_elo = fetch_elo(away)
@@ -484,7 +578,42 @@ def main():
         data["基本面"]["客队"]["Elo更新时间"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
         data["数据完整度"]["Elo获取"] = data["数据完整度"]["Elo获取"] and True
 
-    # 获取积分排名
+    print("获取 xG 数据...")
+    home_xg = fetch_xg(home)
+    away_xg = fetch_xg(away)
+    if home_xg:
+        data["基本面"]["主队"]["近5场xG"] = home_xg.get("xG")
+        data["基本面"]["主队"]["近5场xGA"] = home_xg.get("xGA")
+        data["数据完整度"]["xG获取"] = True
+    if away_xg:
+        data["基本面"]["客队"]["近5场xG"] = away_xg.get("xG")
+        data["基本面"]["客队"]["近5场xGA"] = away_xg.get("xGA")
+        data["数据完整度"]["xG获取"] = data["数据完整度"]["xG获取"] and True
+
+    print("获取伤停信息...")
+    home_injury = fetch_injury(home)
+    away_injury = fetch_injury(away)
+    if home_injury is not None:
+        data["基本面"]["主队"]["伤停名单"] = home_injury
+        data["数据完整度"]["伤停获取"] = True
+    if away_injury is not None:
+        data["基本面"]["客队"]["伤停名单"] = away_injury
+        data["数据完整度"]["伤停获取"] = data["数据完整度"]["伤停获取"] and True
+
+    print("获取竞彩赔率...")
+    odds = fetch_odds(league, home, away)
+    if odds:
+        data["竞彩盘口"] = odds
+        data["数据完整度"]["竞彩赔率获取"] = True
+        data["竞彩赔率状态"] = "已发布"
+    else:
+        data["竞彩赔率状态"] = "未获取"
+
+    print("获取天气...")
+    weather = fetch_weather(home)
+    if weather:
+        data["环境变量"]["天气"] = weather
+
     print("获取积分排名...")
     standings = fetch_standings(league)
     if standings:
@@ -495,14 +624,14 @@ def main():
         home_stand = None
         away_stand = None
 
-    # 获取未来赛程
     print("获取未来赛程...")
     home_future = fetch_future_schedule(league, home)
     away_future = fetch_future_schedule(league, away)
     if home_future:
-        data["环境变量"]["未来赛程"] = {"主队": home_future, "客队": away_future} if away_future else {"主队": home_future}
+        data["环境变量"]["未来赛程"] = {"主队": home_future}
+        if away_future:
+            data["环境变量"]["未来赛程"]["客队"] = away_future
 
-    # 获取近期战绩
     print("获取近期战绩...")
     home_recent = fetch_recent_matches(league, home)
     away_recent = fetch_recent_matches(league, away)
@@ -517,18 +646,25 @@ def main():
         data["基本面"]["客队"]["近5场失球"] = sum(int(m["比分"].split("-")[1]) for m in away_recent)
         data["基本面"]["客队"]["近5场对手及赛事类型"] = [{"对手": m["对手"], "赛事": league} for m in away_recent]
 
-    # 战意指数计算
+    # 战意指数
     war_intention = calculate_war_intention(home_stand, away_stand, home_future, away_future)
     data["战意指数"] = war_intention
 
-    # 获取天气
-    print("获取天气...")
-    weather = fetch_weather(home)  # 主队名可能不是城市名，但暂时如此
-    if weather:
-        data["环境变量"]["天气"] = weather
-
-    # 数据完整度（更新）
-    # ...
+    # 数据完整度
+    missing_fields = []
+    if not data["数据完整度"]["Elo获取"]:
+        missing_fields.append("Elo")
+    if not data["数据完整度"]["xG获取"]:
+        missing_fields.append("xG")
+    if not data["数据完整度"]["伤停获取"]:
+        missing_fields.append("伤停")
+    if not data["数据完整度"]["竞彩赔率获取"]:
+        missing_fields.append("竞彩赔率")
+    data["数据完整度"]["缺失项"] = missing_fields
+    if missing_fields:
+        data["数据完整度"]["风险提示"] = "部分数据缺失：" + "、".join(missing_fields)
+    else:
+        data["数据完整度"]["风险提示"] = "数据完整"
 
     # 渲染与推送
     markdown_text = build_markdown(data)
