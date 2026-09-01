@@ -16,17 +16,20 @@ import io
 # ==================== 配置区域 ====================
 DINGTALK_WEBHOOK_URL = os.environ.get("DINGTALK_WEBHOOK_URL", "https://oapi.dingtalk.com/robot/send?access_token=你的token")
 DINGTALK_SECRET = os.environ.get("DINGTALK_SECRET", "")
-FOOTBALL_DATA_API_KEY = os.environ.get("FOOTBALL_DATA_API_KEY", "")
+FOOTBALL_DATA_API_KEY = os.environ.get("FOOTBALL_DATA_API_KEY", "")  # 注册 football-data.org 获取
 
+# 是否启用实时获取（可全部开启）
 ENABLE_WEATHER = True
-ENABLE_INJURY = True
-ENABLE_XG = True
 ENABLE_ELO = True
-ENABLE_ODDS = True
-ENABLE_STANDINGS = True
+ENABLE_STANDINGS = True       # 积分榜
+ENABLE_SCHEDULE = True        # 未来赛程
+ENABLE_RECENT = True          # 近期战绩
+ENABLE_XG = True              # xG（可能失败）
+ENABLE_INJURY = True          # 伤停（可能失败）
+ENABLE_ODDS = True            # 竞彩赔率（可能失败）
 # ==================================================
 
-# ==================== 球队名称映射（中文 → 英文） ====================
+# ==================== 第一部分：球队名称翻译 ====================
 TEAM_NAME_MAP = {
     "利雅得新月": "Al Hilal",
     "利雅得胜利": "Al Nassr",
@@ -46,12 +49,246 @@ TEAM_NAME_MAP = {
     "阿科多": "Al Akhdoud",
 }
 
-# football-data.org 联赛代码
-LEAGUE_ID_MAP = {
-    "沙职": "SA1",
-    "沙特联": "SA1",
-    "沙地联": "SA1",
-}
+def translate_to_english(text):
+    """使用 MyMemory 免费 API 翻译中文为英文"""
+    try:
+        url = "https://api.mymemory.translated.net/get"
+        params = {"q": text, "langpair": "zh-CN|en"}
+        r = requests.get(url, params=params, timeout=8)
+        data = r.json()
+        if data.get("responseStatus") == 200:
+            return data["responseData"]["translatedText"].strip()
+        else:
+            return None
+    except:
+        return None
+
+def get_english_name(team_name):
+    """优先手动映射，否则自动翻译"""
+    en = TEAM_NAME_MAP.get(team_name)
+    if en:
+        return en
+    print(f"  [翻译] 手动映射未找到 {team_name}，尝试自动翻译...")
+    en = translate_to_english(team_name)
+    if en:
+        print(f"  [翻译] 翻译结果：{en}")
+    return en
+
+# ==================== 第二部分：简单数据获取 ====================
+def fetch_weather(city):
+    """获取真实天气（wttr.in）"""
+    if not ENABLE_WEATHER:
+        return None
+    url = f"https://wttr.in/{urllib.parse.quote(city)}?format=j1"
+    data = get_json(url)
+    if data:
+        try:
+            current = data["current_condition"][0]
+            desc = current["weatherDesc"][0]["value"]
+            temp_c = current["temp_C"]
+            humidity = current["humidity"]
+            wind_speed = current["windspeedKmph"]
+            return f"{desc}，{temp_c}°C，湿度{humidity}%，风速{wind_speed}km/h"
+        except:
+            pass
+    print(f"  [天气] 获取失败（城市：{city}）")
+    return None
+
+def fetch_elo(team_name):
+    """获取真实 Elo（尝试 ClubElo 和 eloratings.net）"""
+    if not ENABLE_ELO:
+        return None
+    english_name = get_english_name(team_name)
+    if not english_name:
+        print(f"  [Elo] 无法获取英文名")
+        return None
+
+    # 源1: ClubElo API
+    api_url = f"https://api.clubelo.com/{english_name.replace(' ', '')}"
+    data = get_json(api_url)
+    if data and isinstance(data, list) and len(data) > 0:
+        elo = safe_float(data[0].get("Elo"))
+        if elo:
+            print(f"  [Elo] {team_name} -> {english_name}，Elo={elo}（ClubElo）")
+            return elo
+
+    # 源2: eloratings.net CSV
+    csv_url = "https://www.eloratings.net/en_clubs.csv"
+    text = get_text(csv_url)
+    if text:
+        try:
+            reader = csv.DictReader(io.StringIO(text))
+            for row in reader:
+                if row.get("Club") and english_name.lower() in row["Club"].lower():
+                    elo = safe_float(row.get("Elo"))
+                    if elo:
+                        print(f"  [Elo] {team_name} -> {english_name}，Elo={elo}（eloratings.net）")
+                        return elo
+        except:
+            pass
+
+    print(f"  [Elo] {team_name} 获取失败")
+    return None
+
+# ==================== 第三部分：较难数据获取 ====================
+def fetch_standings(league):
+    """从 football-data.org 获取积分排名（需 API key）"""
+    if not ENABLE_STANDINGS or not FOOTBALL_DATA_API_KEY:
+        return None
+    league_code = {"沙职": "SA1", "沙特联": "SA1", "沙地联": "SA1"}.get(league)
+    if not league_code:
+        print(f"  [积分] 未找到联赛代码：{league}")
+        return None
+
+    headers = {"X-Auth-Token": FOOTBALL_DATA_API_KEY}
+    url = f"https://api.football-data.org/v4/competitions/{league_code}/standings"
+    data = get_json(url, headers=headers)
+    if data and "standings" in data:
+        try:
+            table = data["standings"][0]["table"]
+            standings = {}
+            for row in table:
+                team_name = row["team"]["name"]
+                for cn, en in TEAM_NAME_MAP.items():
+                    if en.lower() == team_name.lower():
+                        standings[cn] = {
+                            "排名": row["position"],
+                            "积分": row["points"],
+                            "胜": row["won"],
+                            "平": row["draw"],
+                            "负": row["lost"]
+                        }
+                        break
+            if standings:
+                print(f"  [积分] 成功获取 {len(standings)} 支球队积分")
+                return standings
+        except:
+            pass
+    print("  [积分] 获取失败")
+    return None
+
+def _get_team_id(league_code, english_name):
+    """辅助：从 football-data.org 获取球队 ID"""
+    if not FOOTBALL_DATA_API_KEY:
+        return None
+    headers = {"X-Auth-Token": FOOTBALL_DATA_API_KEY}
+    url = f"https://api.football-data.org/v4/competitions/{league_code}/teams"
+    data = get_json(url, headers=headers)
+    if data and "teams" in data:
+        for team in data["teams"]:
+            if team["name"].lower() == english_name.lower():
+                return team["id"]
+    return None
+
+def fetch_future_schedule(league, team_name):
+    """获取未来赛程（需 API key）"""
+    if not ENABLE_SCHEDULE or not FOOTBALL_DATA_API_KEY:
+        return None
+    league_code = {"沙职": "SA1", "沙特联": "SA1", "沙地联": "SA1"}.get(league)
+    if not league_code:
+        return None
+    english_name = get_english_name(team_name)
+    if not english_name:
+        return None
+
+    team_id = _get_team_id(league_code, english_name)
+    if not team_id:
+        print(f"  [赛程] 未找到球队 ID：{team_name}")
+        return None
+
+    headers = {"X-Auth-Token": FOOTBALL_DATA_API_KEY}
+    url = f"https://api.football-data.org/v4/teams/{team_id}/matches?status=SCHEDULED"
+    data = get_json(url, headers=headers)
+    if data and "matches" in data:
+        future = []
+        for match in data["matches"][:5]:
+            try:
+                date = match["utcDate"][:10]
+                if match["homeTeam"]["name"].lower() == english_name.lower():
+                    opponent = match["awayTeam"]["name"]
+                    home_away = "主"
+                else:
+                    opponent = match["homeTeam"]["name"]
+                    home_away = "客"
+                future.append({"对手": opponent, "主客": home_away, "日期": date})
+            except:
+                continue
+        if future:
+            print(f"  [赛程] {team_name} 获取到 {len(future)} 场未来比赛")
+            return future
+    print(f"  [赛程] {team_name} 获取失败")
+    return None
+
+def fetch_recent_matches(league, team_name):
+    """获取近期战绩（需 API key）"""
+    if not ENABLE_RECENT or not FOOTBALL_DATA_API_KEY:
+        return None
+    league_code = {"沙职": "SA1", "沙特联": "SA1", "沙地联": "SA1"}.get(league)
+    if not league_code:
+        return None
+    english_name = get_english_name(team_name)
+    if not english_name:
+        return None
+
+    team_id = _get_team_id(league_code, english_name)
+    if not team_id:
+        print(f"  [战绩] 未找到球队 ID：{team_name}")
+        return None
+
+    headers = {"X-Auth-Token": FOOTBALL_DATA_API_KEY}
+    url = f"https://api.football-data.org/v4/teams/{team_id}/matches?status=FINISHED"
+    data = get_json(url, headers=headers)
+    if data and "matches" in data:
+        recent = []
+        for match in data["matches"][-5:]:
+            try:
+                if match["score"]["winner"] is None:
+                    continue
+                if match["homeTeam"]["name"].lower() == english_name.lower():
+                    gf = match["score"]["fullTime"]["home"]
+                    ga = match["score"]["fullTime"]["away"]
+                    result = "W" if gf > ga else ("L" if gf < ga else "D")
+                    opponent = match["awayTeam"]["name"]
+                else:
+                    gf = match["score"]["fullTime"]["away"]
+                    ga = match["score"]["fullTime"]["home"]
+                    result = "W" if gf > ga else ("L" if gf < ga else "D")
+                    opponent = match["homeTeam"]["name"]
+                recent.append({
+                    "对手": opponent,
+                    "比分": f"{gf}-{ga}",
+                    "结果": result,
+                    "日期": match["utcDate"][:10]
+                })
+            except:
+                continue
+        if recent:
+            print(f"  [战绩] {team_name} 获取到 {len(recent)} 场近期比赛")
+            return recent
+    print(f"  [战绩] {team_name} 获取失败")
+    return None
+
+def fetch_xg(team_name):
+    """获取 xG（Understat 等不支持沙特联赛，此函数暂不实现）"""
+    if not ENABLE_XG:
+        return None
+    # 真实获取非常困难，返回 None
+    return None
+
+def fetch_injury(team_name):
+    """获取伤停名单（无免费稳定源，尝试 SofaScore API，大概率失败）"""
+    if not ENABLE_INJURY:
+        return None
+    # SofaScore API 需要特定请求头，且可能有反爬，成功率低
+    # 此处省略实现，可后续自行研究
+    return None
+
+def fetch_odds(league, home, away):
+    """获取竞彩赔率（中国竞彩官网/500彩票网反爬，无法稳定获取）"""
+    if not ENABLE_ODDS:
+        return None
+    # 真实获取难度大，返回 None
+    return None
 
 # ==================== 辅助函数 ====================
 def get_text(url, headers=None, timeout=8):
@@ -76,213 +313,12 @@ def safe_float(value):
     except:
         return None
 
-# ==================== 数据获取函数 ====================
-
-def fetch_elo(team_name):
-    """获取球队 Elo 评分，尝试 ClubElo API 和 eloratings.net CSV"""
-    if not ENABLE_ELO:
-        return None
-
-    english_name = TEAM_NAME_MAP.get(team_name)
-    if not english_name:
-        print(f"  [Elo] 未找到 {team_name} 的英文映射，跳过")
-        return None
-
-    # 源1: ClubElo API
-    api_url = f"https://api.clubelo.com/{english_name.replace(' ', '')}"
-    data = get_json(api_url)
-    if data:
-        try:
-            if isinstance(data, list) and len(data) > 0:
-                elo = safe_float(data[0].get("Elo"))
-                if elo:
-                    print(f"  [Elo] {team_name} ({english_name}) Elo={elo} (ClubElo)")
-                    return elo
-        except:
-            pass
-
-    # 源2: eloratings.net CSV
-    csv_url = "https://www.eloratings.net/en_clubs.csv"
-    text = get_text(csv_url)
-    if text:
-        try:
-            reader = csv.DictReader(io.StringIO(text))
-            for row in reader:
-                if row.get("Club") and english_name.lower() in row["Club"].lower():
-                    elo = safe_float(row.get("Elo"))
-                    if elo:
-                        print(f"  [Elo] {team_name} ({english_name}) Elo={elo} (eloratings.net)")
-                        return elo
-        except:
-            pass
-
-    print(f"  [Elo] {team_name} 获取失败")
-    return None
-
-def fetch_xg(team_name):
-    """获取近5场 xG 数据（目前暂不实现，返回 None）"""
-    if not ENABLE_XG:
-        return None
-    return None
-
-def fetch_injury(team_name):
-    """获取伤停名单（暂不实现）"""
-    if not ENABLE_INJURY:
-        return None
-    return None
-
-def fetch_odds(league, home, away):
-    """获取竞彩赔率（暂不实现）"""
-    if not ENABLE_ODDS:
-        return None
-    return None
-
-def fetch_weather(city):
-    """获取天气，使用 wttr.in"""
-    if not ENABLE_WEATHER:
-        return None
-    url = f"https://wttr.in/{urllib.parse.quote(city)}?format=j1"
-    data = get_json(url)
-    if data:
-        try:
-            current = data["current_condition"][0]
-            desc = current["weatherDesc"][0]["value"]
-            temp_c = current["temp_C"]
-            humidity = current["humidity"]
-            wind_speed = current["windspeedKmph"]
-            return f"{desc}，{temp_c}°C，湿度{humidity}%，风速{wind_speed}km/h"
-        except:
-            return None
-    return None
-
-def fetch_standings(league):
-    """从 football-data.org 获取积分排名"""
-    if not ENABLE_STANDINGS or not FOOTBALL_DATA_API_KEY:
-        return None
-    league_code = LEAGUE_ID_MAP.get(league)
-    if not league_code:
-        print(f"  [Standings] 未找到 {league} 的联赛代码")
-        return None
-
-    headers = {"X-Auth-Token": FOOTBALL_DATA_API_KEY}
-    url = f"https://api.football-data.org/v4/competitions/{league_code}/standings"
-    data = get_json(url, headers=headers)
-    if data and "standings" in data:
-        try:
-            table = data["standings"][0]["table"]
-            standings = {}
-            for row in table:
-                team_name = row["team"]["name"]
-                for cn, en in TEAM_NAME_MAP.items():
-                    if en.lower() == team_name.lower():
-                        standings[cn] = {
-                            "排名": row["position"],
-                            "积分": row["points"],
-                            "胜": row["won"],
-                            "平": row["draw"],
-                            "负": row["lost"]
-                        }
-                        break
-            if standings:
-                return standings
-        except:
-            pass
-    return None
-
-def fetch_future_schedule(league, team_name):
-    """从 football-data.org 获取未来赛程"""
-    if not FOOTBALL_DATA_API_KEY:
-        return None
-    league_code = LEAGUE_ID_MAP.get(league)
-    if not league_code:
-        return None
-    english_name = TEAM_NAME_MAP.get(team_name)
-    if not english_name:
-        return None
-
-    headers = {"X-Auth-Token": FOOTBALL_DATA_API_KEY}
-    # 获取球队 ID
-    teams_url = f"https://api.football-data.org/v4/competitions/{league_code}/teams"
-    teams_data = get_json(teams_url, headers=headers)
-    team_id = None
-    if teams_data and "teams" in teams_data:
-        for team in teams_data["teams"]:
-            if team["name"].lower() == english_name.lower():
-                team_id = team["id"]
-                break
-    if not team_id:
-        return None
-
-    matches_url = f"https://api.football-data.org/v4/teams/{team_id}/matches?status=SCHEDULED"
-    matches_data = get_json(matches_url, headers=headers)
-    if matches_data and "matches" in matches_data:
-        future = []
-        for match in matches_data["matches"][:5]:
-            try:
-                date = match["utcDate"][:10]
-                if match["homeTeam"]["name"].lower() == english_name.lower():
-                    opponent = match["awayTeam"]["name"]
-                    home_away = "主"
-                else:
-                    opponent = match["homeTeam"]["name"]
-                    home_away = "客"
-                future.append({"对手": opponent, "主客": home_away, "日期": date})
-            except:
-                continue
-        return future
-    return None
-
-def fetch_recent_matches(league, team_name):
-    """从 football-data.org 获取近期战绩（近5场）"""
-    if not FOOTBALL_DATA_API_KEY:
-        return None
-    league_code = LEAGUE_ID_MAP.get(league)
-    if not league_code:
-        return None
-    english_name = TEAM_NAME_MAP.get(team_name)
-    if not english_name:
-        return None
-
-    headers = {"X-Auth-Token": FOOTBALL_DATA_API_KEY}
-    teams_url = f"https://api.football-data.org/v4/competitions/{league_code}/teams"
-    teams_data = get_json(teams_url, headers=headers)
-    team_id = None
-    if teams_data and "teams" in teams_data:
-        for team in teams_data["teams"]:
-            if team["name"].lower() == english_name.lower():
-                team_id = team["id"]
-                break
-    if not team_id:
-        return None
-
-    matches_url = f"https://api.football-data.org/v4/teams/{team_id}/matches?status=FINISHED"
-    matches_data = get_json(matches_url, headers=headers)
-    if matches_data and "matches" in matches_data:
-        recent = []
-        for match in matches_data["matches"][-5:]:
-            try:
-                if match["score"]["winner"] is None:
-                    continue
-                if match["homeTeam"]["name"].lower() == english_name.lower():
-                    gf = match["score"]["fullTime"]["home"]
-                    ga = match["score"]["fullTime"]["away"]
-                    result = "W" if gf > ga else ("L" if gf < ga else "D")
-                    opponent = match["awayTeam"]["name"]
-                else:
-                    gf = match["score"]["fullTime"]["away"]
-                    ga = match["score"]["fullTime"]["home"]
-                    result = "W" if gf > ga else ("L" if gf < ga else "D")
-                    opponent = match["homeTeam"]["name"]
-                recent.append({
-                    "对手": opponent,
-                    "比分": f"{gf}-{ga}",
-                    "结果": result,
-                    "日期": match["utcDate"][:10]
-                })
-            except:
-                continue
-        return recent
-    return None
+def extract_city_from_team(team_name):
+    city_prefixes = ["利雅得", "吉达", "麦加", "达曼", "哈萨", "布赖代", "艾卜哈", "塔伊", "卡利杰", "阿科多"]
+    for prefix in city_prefixes:
+        if team_name.startswith(prefix):
+            return prefix
+    return team_name
 
 # ==================== 战意指数计算 ====================
 def calculate_war_intention(home_standings, away_standings, home_future, away_future):
@@ -353,7 +389,7 @@ def calculate_war_intention(home_standings, away_standings, home_future, away_fu
         }
     }
 
-# ==================== 主程序 ====================
+# ==================== 第四部分：合并输出 ====================
 def parse_input(input_str):
     pattern = r'^(\S+\d{3})\s+(\S+)\s+(.+?)\s+VS\s+(.+)$'
     match = re.match(pattern, input_str.strip(), re.IGNORECASE)
@@ -462,7 +498,7 @@ def main():
     match_id, league, home, away = parsed
     print(f"正在获取 {match_id} {league} {home} vs {away} 的数据...")
 
-    # ==================== 初始化 data 字典（完整） ====================
+    # ==================== 初始化数据结构 ====================
     data = {
         "赛事编号": match_id,
         "联赛": league,
@@ -566,7 +602,13 @@ def main():
     }
 
     # ==================== 获取数据 ====================
-    print("获取 Elo 评分...")
+    # 天气
+    city_for_weather = extract_city_from_team(home)
+    weather = fetch_weather(city_for_weather)
+    if weather:
+        data["环境变量"]["天气"] = weather
+
+    # Elo
     home_elo = fetch_elo(home)
     away_elo = fetch_elo(away)
     if home_elo:
@@ -578,43 +620,7 @@ def main():
         data["基本面"]["客队"]["Elo更新时间"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
         data["数据完整度"]["Elo获取"] = data["数据完整度"]["Elo获取"] and True
 
-    print("获取 xG 数据...")
-    home_xg = fetch_xg(home)
-    away_xg = fetch_xg(away)
-    if home_xg:
-        data["基本面"]["主队"]["近5场xG"] = home_xg.get("xG")
-        data["基本面"]["主队"]["近5场xGA"] = home_xg.get("xGA")
-        data["数据完整度"]["xG获取"] = True
-    if away_xg:
-        data["基本面"]["客队"]["近5场xG"] = away_xg.get("xG")
-        data["基本面"]["客队"]["近5场xGA"] = away_xg.get("xGA")
-        data["数据完整度"]["xG获取"] = data["数据完整度"]["xG获取"] and True
-
-    print("获取伤停信息...")
-    home_injury = fetch_injury(home)
-    away_injury = fetch_injury(away)
-    if home_injury is not None:
-        data["基本面"]["主队"]["伤停名单"] = home_injury
-        data["数据完整度"]["伤停获取"] = True
-    if away_injury is not None:
-        data["基本面"]["客队"]["伤停名单"] = away_injury
-        data["数据完整度"]["伤停获取"] = data["数据完整度"]["伤停获取"] and True
-
-    print("获取竞彩赔率...")
-    odds = fetch_odds(league, home, away)
-    if odds:
-        data["竞彩盘口"] = odds
-        data["数据完整度"]["竞彩赔率获取"] = True
-        data["竞彩赔率状态"] = "已发布"
-    else:
-        data["竞彩赔率状态"] = "未获取"
-
-    print("获取天气...")
-    weather = fetch_weather(home)
-    if weather:
-        data["环境变量"]["天气"] = weather
-
-    print("获取积分排名...")
+    # 积分排名
     standings = fetch_standings(league)
     if standings:
         data["环境变量"]["积分排名"] = standings
@@ -624,15 +630,16 @@ def main():
         home_stand = None
         away_stand = None
 
-    print("获取未来赛程...")
+    # 未来赛程
     home_future = fetch_future_schedule(league, home)
     away_future = fetch_future_schedule(league, away)
-    if home_future:
-        data["环境变量"]["未来赛程"] = {"主队": home_future}
-        if away_future:
-            data["环境变量"]["未来赛程"]["客队"] = away_future
+    if home_future or away_future:
+        data["环境变量"]["未来赛程"] = {
+            "主队": home_future,
+            "客队": away_future
+        }
 
-    print("获取近期战绩...")
+    # 近期战绩
     home_recent = fetch_recent_matches(league, home)
     away_recent = fetch_recent_matches(league, away)
     if home_recent:
@@ -646,11 +653,40 @@ def main():
         data["基本面"]["客队"]["近5场失球"] = sum(int(m["比分"].split("-")[1]) for m in away_recent)
         data["基本面"]["客队"]["近5场对手及赛事类型"] = [{"对手": m["对手"], "赛事": league} for m in away_recent]
 
+    # xG、伤停、赔率（尝试真实获取，失败则保持 null）
+    home_xg = fetch_xg(home)
+    away_xg = fetch_xg(away)
+    if home_xg:
+        data["基本面"]["主队"]["近5场xG"] = home_xg.get("xG")
+        data["基本面"]["主队"]["近5场xGA"] = home_xg.get("xGA")
+        data["数据完整度"]["xG获取"] = True
+    if away_xg:
+        data["基本面"]["客队"]["近5场xG"] = away_xg.get("xG")
+        data["基本面"]["客队"]["近5场xGA"] = away_xg.get("xGA")
+        data["数据完整度"]["xG获取"] = data["数据完整度"]["xG获取"] and True
+
+    home_injury = fetch_injury(home)
+    away_injury = fetch_injury(away)
+    if home_injury is not None:
+        data["基本面"]["主队"]["伤停名单"] = home_injury
+        data["数据完整度"]["伤停获取"] = True
+    if away_injury is not None:
+        data["基本面"]["客队"]["伤停名单"] = away_injury
+        data["数据完整度"]["伤停获取"] = data["数据完整度"]["伤停获取"] and True
+
+    odds = fetch_odds(league, home, away)
+    if odds:
+        data["竞彩盘口"] = odds
+        data["数据完整度"]["竞彩赔率获取"] = True
+        data["竞彩赔率状态"] = "已发布"
+    else:
+        data["竞彩赔率状态"] = "未获取"
+
     # 战意指数
     war_intention = calculate_war_intention(home_stand, away_stand, home_future, away_future)
     data["战意指数"] = war_intention
 
-    # 数据完整度
+    # 数据完整度风险提示
     missing_fields = []
     if not data["数据完整度"]["Elo获取"]:
         missing_fields.append("Elo")
@@ -666,7 +702,7 @@ def main():
     else:
         data["数据完整度"]["风险提示"] = "数据完整"
 
-    # 渲染与推送
+    # 渲染推送
     markdown_text = build_markdown(data)
     print("\n生成的 Markdown 内容：")
     print(markdown_text)
