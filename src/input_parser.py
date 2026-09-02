@@ -26,7 +26,13 @@ LEAGUE_MAP = {
 }
 
 def parse_match_input(input_text, target_date=None):
-    if target_date is None:
+    """
+    解析比赛输入，格式如：周二001 沙职 利雅得新月 VS 吉达国民
+    支持多行输入，每行一场比赛。
+    target_date 可以是 None、空字符串或 'YYYY-MM-DD' 格式字符串。
+    """
+    # 处理 target_date 为 None 或空字符串的情况
+    if target_date is None or target_date == "":
         target_date = datetime.now().date()
     elif isinstance(target_date, str):
         target_date = datetime.strptime(target_date, "%Y-%m-%d").date()
@@ -34,16 +40,19 @@ def parse_match_input(input_text, target_date=None):
     matches = []
     lines = [l.strip() for l in input_text.strip().splitlines() if l.strip()]
     pattern = re.compile(r"^(周[一二三四五六日])(\d{3})\s+(.+?)\s+VS\s+(.+?)$", re.IGNORECASE)
+
     for line in lines:
         m = pattern.match(line)
         if not m:
             print(f"无法解析的行：{line}")
             continue
+
         weekday_cn = m.group(1)
         match_no = f"{weekday_cn}{m.group(2)}"
         middle_part = m.group(3).strip()
         away_team = m.group(4).strip()
 
+        # 尝试提取联赛信息
         league = None
         home_team = middle_part
         for abbr, full in LEAGUE_MAP.items():
@@ -57,6 +66,7 @@ def parse_match_input(input_text, target_date=None):
                 league = LEAGUE_MAP[tokens[0]]
                 home_team = " ".join(tokens[1:]).strip()
 
+        # 推断比赛日期：根据星期几和 target_date 计算最近的该星期几
         weekday_num = WEEKDAY_MAP[weekday_cn]
         days_ahead = (weekday_num - target_date.weekday()) % 7
         match_date = target_date + timedelta(days=days_ahead)
@@ -69,4 +79,5 @@ def parse_match_input(input_text, target_date=None):
             "away_team": away_team,
             "match_date": match_date.strftime("%Y-%m-%d")
         })
+
     return matches
